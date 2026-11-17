@@ -1,3 +1,4 @@
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -45,6 +46,30 @@ async def test_webhook_retries_then_succeeds():
 @respx.mock
 async def test_webhook_fails_after_max_retries():
     route = respx.post("https://hooks.example/fail").mock(return_value=Response(500))
-    with pytest.raises(RuntimeError, match="Webhook delivery failed"):
+    with pytest.raises(RuntimeError, match="Webhook delivery failed") as exc_info:
         await send_webhook("https://hooks.example/fail", {"payment_id": "3"})
     assert route.call_count == 3
+    assert exc_info.value.__cause__ is not None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_webhook_backoff_on_network_and_client_errors(monkeypatch):
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("app.services.webhook.asyncio.sleep", fake_sleep)
+    route = respx.post("https://hooks.example/flaky").mock(
+        side_effect=[
+            httpx.ConnectError("connection refused"),
+            Response(404),
+            Response(204),
+        ]
+    )
+
+    await send_webhook("https://hooks.example/flaky", {"payment_id": "4", "status": "succeeded"})
+
+    assert route.call_count == 3
+    assert delays == pytest.approx([0.01, 0.02])

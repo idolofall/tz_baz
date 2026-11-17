@@ -7,10 +7,13 @@ from faststream.rabbit import RabbitMessage
 from app.core.config import get_settings
 from app.messaging.broker import (
     broker,
+    declare_topology,
     payments_dlq,
     payments_exchange,
     payments_queue,
+    payments_retry,
 )
+from app.messaging.retry import retry_delay_ms
 from app.services.processor import process_payment_message
 
 logging.basicConfig(
@@ -21,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 app = FastStream(broker)
 settings = get_settings()
+
+
+@app.after_startup
+async def _declare_topology() -> None:
+    await declare_topology()
 
 
 @broker.subscriber(payments_dlq)
@@ -60,10 +68,16 @@ async def on_payment_new(body: dict, message: RabbitMessage) -> None:
             logger.error("Payment %s moved to DLQ after %s attempts", payment_id_raw, next_retry)
             return
 
+        delay_ms = retry_delay_ms(next_retry, settings.consumer_retry_base_delay_sec)
         await broker.publish(
             body,
-            exchange=payments_exchange,
-            routing_key=settings.payments_routing_key,
+            queue=payments_retry,
             headers={**headers, "x-retry-count": next_retry},
+            expiration=delay_ms,
         )
-        logger.warning("Payment %s requeued (attempt %s)", payment_id_raw, next_retry)
+        logger.warning(
+            "Payment %s requeued with delay %sms (attempt %s)",
+            payment_id_raw,
+            delay_ms,
+            next_retry,
+        )

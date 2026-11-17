@@ -24,11 +24,13 @@ class Settings(BaseSettings):
     payment_success_rate: float = 0.9
 
     consumer_max_retries: int = 3
+    consumer_retry_base_delay_sec: float = 1.0
 
     payments_exchange: str = "payments"
     payments_routing_key: str = "payments.new"
     payments_queue: str = "payments.new"
     payments_dlq: str = "payments.new.dlq"
+    payments_retry_queue: str = "payments.retry"
 
 
 @lru_cache

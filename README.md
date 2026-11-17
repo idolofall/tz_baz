@@ -33,6 +33,7 @@ docker compose up --build
 - `RABBITMQ_URL` — AMQP URL
 - `API_KEY` — статический ключ для заголовка `X-API-Key`
 - `CONSUMER_MAX_RETRIES` — попытки обработки сообщения до DLQ (по умолчанию 3)
+- `CONSUMER_RETRY_BASE_DELAY_SEC` — базовая задержка повторной обработки (1с, 2с, …)
 - `WEBHOOK_MAX_RETRIES` — попытки webhook с экспоненциальной задержкой
 
 ## Примеры API
@@ -63,7 +64,7 @@ curl -s -X POST http://localhost:8000/api/v1/payments \
 }
 ```
 
-Повторный запрос с тем же `Idempotency-Key` не создаёт дубль.
+Повторный запрос с тем же `Idempotency-Key` и тем же телом возвращает существующий платёж (`200`). Тот же ключ с другим телом — `409 Conflict`.
 
 ### Получить платёж
 
@@ -76,9 +77,9 @@ curl -s http://localhost:8000/api/v1/payments/<payment_id> \
 
 1. **POST /payments** — в одной транзакции создаются `payments` + запись в `outbox`.
 2. **Outbox relay** (фон в API) — публикует pending-события в exchange `payments` (routing key `payments.new`).
-3. **Consumer** — читает очередь `payments.new`, эмуляция шлюза (2–5 сек, ~90% success), статус, webhook.
-4. При ошибках обработки — до 3 попыток, затем сообщение уходит в `payments.new.dlq`.
-5. Webhook — до 3 попыток с экспоненциальной задержкой.
+3. **Consumer** — атомарно захватывает платёж (`pending` → `processing`), эмуляция шлюза вне сессии БД (2–5 сек, ~90% success), финальный статус, webhook.
+4. При ошибках обработки — повтор через очередь `payments.retry` с экспоненциальной задержкой, затем `payments.new.dlq`.
+5. Webhook — до 3 попыток с экспоненциальной задержкой; повторная доставка сообщения не шлёт webhook повторно после успешной отметки.
 
 ## Тесты
 
@@ -114,6 +115,7 @@ app/
   core/         # settings, db, auth
   messaging/    # RabbitMQ broker / queues
   models/       # SQLAlchemy модели
+  repositories/ # SQL-запросы к БД
   schemas/      # Pydantic схемы
   services/     # бизнес-логика, outbox, webhook
   main.py       # FastAPI + outbox relay

@@ -1,11 +1,20 @@
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.outbox import Outbox, OutboxStatus
 from app.models.payment import Payment, PaymentStatus
+from app.repositories import outbox as outbox_repo
+from app.repositories import payment as payment_repo
 from app.schemas.payment import PaymentCreate, PaymentCreatedResponse, PaymentResponse
+
+_AMOUNT_QUANT = Decimal("0.01")
+
+
+class IdempotencyConflict(Exception):
+    """Same Idempotency-Key was already used with a different request body."""
 
 
 def payment_to_response(payment: Payment) -> PaymentResponse:
@@ -31,19 +40,29 @@ def payment_to_created_response(payment: Payment) -> PaymentCreatedResponse:
     )
 
 
-async def get_payment_by_id(session: AsyncSession, payment_id: UUID) -> Payment | None:
-    result = await session.execute(select(Payment).where(Payment.id == payment_id))
-    return result.scalar_one_or_none()
-
-
-async def get_payment_by_idempotency_key(
-    session: AsyncSession,
-    idempotency_key: str,
-) -> Payment | None:
-    result = await session.execute(
-        select(Payment).where(Payment.idempotency_key == idempotency_key)
+def payloads_match(payment: Payment, payload: PaymentCreate) -> bool:
+    return (
+        payment.amount.quantize(_AMOUNT_QUANT) == payload.amount.quantize(_AMOUNT_QUANT)
+        and payment.currency == payload.currency
+        and payment.description == payload.description
+        and (payment.metadata_ or {}) == (payload.metadata or {})
+        and payment.webhook_url == str(payload.webhook_url)
     )
-    return result.scalar_one_or_none()
+
+
+def _existing_or_conflict(existing: Payment, payload: PaymentCreate) -> Payment:
+    if not payloads_match(existing, payload):
+        raise IdempotencyConflict
+    return existing
+
+
+def _is_idempotency_key_conflict(exc: IntegrityError) -> bool:
+    message = str(exc.orig).lower() if exc.orig is not None else str(exc).lower()
+    return "idempotency_key" in message or "ix_payments_idempotency_key" in message
+
+
+async def get_payment_by_id(session: AsyncSession, payment_id: UUID) -> Payment | None:
+    return await payment_repo.get_by_id(session, payment_id)
 
 
 async def create_payment(
@@ -52,9 +71,9 @@ async def create_payment(
     idempotency_key: str,
 ) -> tuple[Payment, bool]:
     """Create payment + outbox event. Returns (payment, created)."""
-    existing = await get_payment_by_idempotency_key(session, idempotency_key)
+    existing = await payment_repo.get_by_idempotency_key(session, idempotency_key)
     if existing is not None:
-        return existing, False
+        return _existing_or_conflict(existing, payload), False
 
     payment = Payment(
         amount=payload.amount,
@@ -65,8 +84,18 @@ async def create_payment(
         idempotency_key=idempotency_key,
         webhook_url=str(payload.webhook_url),
     )
-    session.add(payment)
-    await session.flush()
+    payment_repo.add(session, payment)
+
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        if not _is_idempotency_key_conflict(exc):
+            raise
+        await session.rollback()
+        raced = await payment_repo.get_by_idempotency_key(session, idempotency_key)
+        if raced is None:
+            raise
+        return _existing_or_conflict(raced, payload), False
 
     outbox = Outbox(
         aggregate_id=payment.id,
@@ -80,7 +109,7 @@ async def create_payment(
         status=OutboxStatus.PENDING,
         attempts=0,
     )
-    session.add(outbox)
+    outbox_repo.add(session, outbox)
     await session.commit()
     await session.refresh(payment)
     return payment, True

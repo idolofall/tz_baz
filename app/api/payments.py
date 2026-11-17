@@ -7,6 +7,7 @@ from app.core.db import get_session
 from app.core.security import verify_api_key
 from app.schemas.payment import PaymentCreate, PaymentCreatedResponse, PaymentResponse
 from app.services.payment import (
+    IdempotencyConflict,
     create_payment,
     get_payment_by_id,
     payment_to_created_response,
@@ -30,11 +31,17 @@ async def create_payment_endpoint(
 ) -> PaymentCreatedResponse:
     if not idempotency_key.strip():
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Idempotency-Key must not be empty",
         )
 
-    payment, created = await create_payment(session, payload, idempotency_key.strip())
+    try:
+        payment, created = await create_payment(session, payload, idempotency_key.strip())
+    except IdempotencyConflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Idempotency-Key already used with a different request body",
+        ) from None
     if not created:
         response.status_code = status.HTTP_200_OK
     return payment_to_created_response(payment)

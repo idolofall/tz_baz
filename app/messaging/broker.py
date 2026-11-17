@@ -27,10 +27,20 @@ payments_queue = RabbitQueue(
     },
 )
 
+payments_retry = RabbitQueue(
+    settings.payments_retry_queue,
+    durable=True,
+    arguments={
+        "x-dead-letter-exchange": settings.payments_exchange,
+        "x-dead-letter-routing-key": settings.payments_routing_key,
+    },
+)
+
 
 async def declare_topology() -> None:
     """Declare exchange, queues and bind payments.new to the exchange."""
     exchange = await broker.declare_exchange(payments_exchange)
     await broker.declare_queue(payments_dlq)
+    await broker.declare_queue(payments_retry)
     queue = await broker.declare_queue(payments_queue)
     await queue.bind(exchange, routing_key=settings.payments_routing_key)

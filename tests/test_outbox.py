@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models.outbox import Outbox, OutboxStatus
 from app.models.payment import PaymentStatus
 from app.schemas.payment import PaymentCreate
-from app.services.payment import create_payment
+from app.services.payment import IdempotencyConflict, create_payment
 
 
 @pytest.mark.asyncio
@@ -59,3 +59,24 @@ async def test_idempotent_create_does_not_duplicate_outbox(engine, clean_db):
         result = await session.execute(select(Outbox).where(Outbox.aggregate_id == first.id))
         rows = result.scalars().all()
         assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotent_create_rejects_different_payload(engine, clean_db):
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    payload = PaymentCreate(
+        amount=Decimal("10.00"),
+        currency="EUR",
+        description="dup",
+        metadata={},
+        webhook_url="https://example.com/hook",
+    )
+    other = payload.model_copy(update={"amount": Decimal("11.00")})
+
+    async with session_factory() as session:
+        _, created = await create_payment(session, payload, "conflict-key")
+        assert created is True
+
+    async with session_factory() as session:
+        with pytest.raises(IdempotencyConflict):
+            await create_payment(session, other, "conflict-key")

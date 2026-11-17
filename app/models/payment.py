@@ -18,6 +18,7 @@ class Currency(str, enum.Enum):
 
 class PaymentStatus(str, enum.Enum):
     PENDING = "pending"
+    PROCESSING = "processing"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
@@ -50,3 +51,11 @@ class Payment(Base):
         nullable=False,
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    webhook_delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )

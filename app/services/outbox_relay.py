@@ -1,13 +1,10 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
-
-from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.db import async_session_factory
 from app.messaging.broker import broker, payments_exchange
-from app.models.outbox import Outbox, OutboxStatus
+from app.repositories import outbox as outbox_repo
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +14,7 @@ async def publish_pending_outbox() -> int:
     settings = get_settings()
     published = 0
     async with async_session_factory() as session:
-        result = await session.execute(
-            select(Outbox)
-            .where(Outbox.status == OutboxStatus.PENDING)
-            .order_by(Outbox.created_at)
-            .limit(50)
-            .with_for_update(skip_locked=True)
-        )
-        rows = list(result.scalars().all())
+        rows = await outbox_repo.lock_pending(session, limit=50)
 
         for row in rows:
             try:
@@ -33,15 +23,11 @@ async def publish_pending_outbox() -> int:
                     exchange=payments_exchange,
                     routing_key=settings.payments_routing_key,
                 )
-                row.status = OutboxStatus.PUBLISHED
-                row.published_at = datetime.now(timezone.utc)
-                row.attempts += 1
+                outbox_repo.mark_published(row)
                 published += 1
             except Exception:
-                row.attempts += 1
+                outbox_repo.record_publish_failure(row)
                 logger.exception("Failed to publish outbox event %s", row.id)
-                if row.attempts >= 10:
-                    row.status = OutboxStatus.FAILED
 
         await session.commit()
 
