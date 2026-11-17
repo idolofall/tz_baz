@@ -77,7 +77,7 @@ curl -s http://localhost:8000/api/v1/payments/<payment_id> \
 
 1. **POST /payments** — в одной транзакции создаются `payments` + запись в `outbox`.
 2. **Outbox relay** (фон в API) — публикует pending-события в exchange `payments` (routing key `payments.new`).
-3. **Consumer** — атомарно захватывает платёж (`pending` → `processing`), эмуляция шлюза вне сессии БД (2–5 сек, ~90% success), финальный статус, webhook.
+3. **Consumer** — атомарно захватывает платёж (`pending` → `processing`), эмуляция шлюза вне сессии БД (2–5 сек, ~90% success), финальный статус, webhook. Если воркер умер в `processing`, другой consumer забирает платёж заново, когда `processing_started_at` старше `2 × PAYMENT_PROCESS_MAX_SEC`.
 4. При ошибках обработки — повтор через очередь `payments.retry` с экспоненциальной задержкой, затем `payments.new.dlq`.
 5. Webhook — до 3 попыток с экспоненциальной задержкой; повторная доставка сообщения не шлёт webhook повторно после успешной отметки.
 
